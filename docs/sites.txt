@@ -1,0 +1,29 @@
+carwale.com
+cardekho.com
+spinny.com
+droom.com
+cartrade.com
+
+
+[
+    url: cardekho.com,
+    data: [{
+        name: listing
+        query: 'div>.class',
+        type: 'html',
+        typeVal: null,
+    }, 
+    {
+        name: listing
+        query: 'div>.class',
+        type: 'data'
+        typeVal: 'reference',
+    },
+    {
+        name: listing
+        query: 'div>.class',
+        type: 'attr'
+        typeVal: 'reference',
+    }]
+
+]
