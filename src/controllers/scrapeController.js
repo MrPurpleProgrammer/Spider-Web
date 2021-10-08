@@ -1,51 +1,69 @@
 const cheerio = require('cheerio');
 const fetch = require('node-fetch');
 const puppetController = require('./puppetController');
-const cardekho = require('../scripts/carDhekho.json')
+const cardekho = require('../scripts/targeted/car-listings/carDhekho.json')
+const olxCars = require('../scripts/targeted/car-listings/olxCars.json')
+const droomUrls = require('../scripts/crawler/www.droom.com.json');
+const cardhekhoUrls = require('../scripts/crawler/cardhekho-buy-used-car-details.json');
+const spinnyUrls = require('../scripts/crawler/spinny-buy-used-car.json');
+const { sleep, chunks } = require('../utils/promiseUtils');
+const { response } = require('../server');
+const { crawlAndRetrieve } = require('./crawlerController');
 
 async function handlePuppet(url, request) {
     let puppet = await puppetController.initiatePuppet();
     let page = puppet.page;
-    await page.goto(url);
-    await page.waitForSelector(request.data[0].query, {
-        visible: true,
+    await page.goto(url, {
+        waitUntil: 'load',
+        // Remove the timeout
     });
+    // await page.waitForSelector(request.data[0].query, {
+    //     visible: true,
+    // });
     if (typeof request.puppet.scroll !== 'undefined') {
         await puppetController.autoScroll(page, request.puppet.scroll.timeout);
         await page.waitFor(5000);
-        return { content: await page.content(), page: page, broswer: puppet.broswer }
     }
-    else {
-        return null
+    if (typeof request.puppet.scrollClick !== 'undefined') {
+        await puppetController.autoClick(page, request.puppet.scrollClick.timeout, request.puppet.scrollClick.element);
+        await puppetController.scroll(page);
+        await page.waitFor(5000);
     }
-
+    return { content: await page.content(), page: page, broswer: puppet.broswer }
 }
 
-async function getSourceCodes(requests) {
-    //loop through requests
-    const htmlLists = requests.map(async r => {
-        //retrieve urls from request objecct
-        try {
-            //if url is relative, add the base url to the beggining of the url
-            if (r.url[0] === '/') {
-                r.url = requests.baseUrl + r.url;
-            }
-            if (typeof r.puppet !== 'undefined') {
-                let resp = await handlePuppet(r.url, r)
-                await resp.broswer.close();
-                return resp.content;
-            }
-            else {
-                //fetch data and retrieve raw html content on initial load 
-                const res = await fetch(r.url);
-                const html = await res.text();
-                return html;
-            }
+let processSourceCode = async (r, i, arr) => {
+    //retrieve urls from request objecct
+    try {
+        //if url is relative, add the base url to the beggining of the url
+        if (r.url[0] === '/' && typeof arr !== "undefined") {
+            r.url = arr.baseUrl + r.url;
         }
-        catch (err) {
-            console.log(err);
+        if (typeof r.puppet !== 'undefined') {
+            let resp = await handlePuppet(r.url, r)
+            await resp.broswer.close();
+            return resp.content;
         }
-    });
+        else {
+            //fetch data and retrieve raw html content on initial load 
+            const res = await fetch(r.url);
+            const html = await res.text();
+            return html;
+        }
+    }
+    catch (err) {
+        console.log(err);
+    }
+}
+
+async function getSourceCodes(requests, variation) {
+    let htmlLists;
+    if (variation !== 'onebyone') htmlLists = await chunks(requests, processSourceCode, 5);
+    else {
+        htmlLists = requests.map(async (r, i, arr) => {
+            return await processSourceCode(r, i, arr);
+        });
+    }
     return Promise.all(htmlLists);
 }
 
@@ -86,7 +104,7 @@ function handleTypeVal(d, e, $) {
     return val
 }
 
-async function modifyDataInquiry($, requests, index) {
+function modifyDataInquiry($, requests, index) {
     //Modify Data Inquiry Object and Convert it to Html Results
     const request = requests[index];
     let modJson = [];
@@ -145,12 +163,25 @@ async function modifyDataInquiry($, requests, index) {
     return modJson
 }
 
-async function retrieveData(requests) {
-    let htmlList = await getSourceCodes(requests);
+async function retrieveData(requests, variation) {
+    let htmlList = await getSourceCodes(requests, variation);
     return Promise.all(htmlList.map(async (html, i, arr) => {
         let url = requests[i].url;
+        if (typeof html !== 'string') {
+            return {
+                url,
+                title: null,
+                favicon: null,
+                // description: $('meta[name=description]').attr('content'),
+                description: null,
+                image: null,
+                author: null,
+                // html: html,
+                data: null
+            }
+        }
         const $ = cheerio.load(html);
-        let dataset = await modifyDataInquiry($, requests, i)
+        let dataset = modifyDataInquiry($, requests, i)
         const getMetatag = (name) =>
             $(`meta[name=${name}]`).attr('content') ||
             $(`meta[name="og:${name}"]`).attr('content') ||
@@ -173,30 +204,47 @@ async function retrieveData(requests) {
     }));
 }
 
-async function scrapeUrl(req, res, next) {
-    let response = await retrieveData(req.body.requests)
+async function scrapeUrl(req, res, next, variation, filename) {
+    let response;
+    if (variation === 'crawl') response = await crawlAndRetrieve(req.body.requests, filename);
+    else {
+        response = await retrieveData(req.body.requests, variation)
+    }
     return Promise.all(response.map(async (e, i) => {
-        if (typeof e.data[0].scrapeResult !== 'undefined') {
-            let modResponseData = await Promise.all(e.data.map(async (eachChild, i) => {
-                let dataEach = await retrieveData(eachChild.scrapeResult);
-                let cleanedUpDataSet = {}
-                dataEach.forEach((e, index) => {
-                    for (i = 0; i < e.data.length; i++) {
-                        cleanedUpDataSet = { ...cleanedUpDataSet, ...e.data[i] }
-                    }
-                });
-                dataEach[0].data = [cleanedUpDataSet];
-                let modE = { ...eachChild, scrapeResult: dataEach };
-                return modE
-            }))
-            e.data = modResponseData;
-            return e;
+        try {
+            if (e.data.length !== 0 || e.data.length !== null && typeof e.data[0] !== 'undefined' && Array.isArray(e.data)) {
+                if (typeof e.data[0].scrapeResult !== 'undefined') {
+                    let modResponseData = await Promise.all(e.data.map(async (eachChild, i) => {
+                        let dataEach
+                        if (typeof eachChild.scrapeResult !== 'undefined') {
+                            dataEach = await retrieveData(eachChild.scrapeResult);
+                        }
+                        let cleanedUpDataSet = {}
+                        dataEach.forEach((e, index) => {
+                            for (i = 0; i < e.data.length; i++) {
+                                cleanedUpDataSet = { ...cleanedUpDataSet, ...e.data[i] }
+                            }
+                        });
+                        dataEach[0].data = [cleanedUpDataSet];
+                        let modE = { ...eachChild, scrapeResult: dataEach };
+                        return modE
+                    }))
+                    e.data = modResponseData;
+                    return e;
+                }
+                else return e
+            }
+            else return e
         }
-        else return e
+        catch (err) {
+            console.log(err);
+            return e
+        }
+
     }))
 }
 
-async function scrapeCarDekho(req, res, next) {
+async function scrapeCarDekho_Targeted(req, res, next) {
     return new Promise((resolve, reject) => {
         req.body = cardekho;
         scrapeUrl(req, res, next).then(resp => {
@@ -205,8 +253,188 @@ async function scrapeCarDekho(req, res, next) {
     })
 }
 
+async function scrapeOlxCars_Targeted(req, res, next) {
+    return new Promise((resolve, reject) => {
+        req.body = olxCars;
+        scrapeUrl(req, res, next).then(resp => {
+            resolve(resp);
+        });
+    })
+}
+
+async function scrapeDroomCars_Crawler(req, res, next, filename) {
+    return new Promise((resolve, reject) => {
+        let newRequestBody = { requests: [] };
+        let urls = droomUrls.urls;
+        urls.map((e, i, arr) => {
+            if (e.startsWith('https://droom.in/product')) {
+                let obj = {
+                    baseUrl: "https://www.droom.in",
+                    url: e,
+                    data: [
+                        {
+                            "name": "carName",
+                            "query": ".product_sidebar .detailBlock .page-header h1",
+                            "type": "html",
+                            "typeVal": null
+                        },
+                        {
+                            "name": "carSecondaryDetails",
+                            "query": ".product_sidebar .detailBlock .summary span",
+                            "type": "text",
+                            "typeVal": null
+                        },
+                        {
+                            "name": "carPrice",
+                            "query": ".product_sidebar .actions .price .offer>.text-decoration",
+                            "type": "html",
+                            "typeVal": null
+                        },
+                        {
+                            "name": "financingDetails",
+                            "query_name": ".product_content .toolBar .score .title label",
+                            "query_val": ".product_content .toolBar .score .title span",
+                            "type": "text",
+                            "val": true,
+                            "typeVal": null
+                        }
+                    ],
+                    puppet: null,
+                }
+                newRequestBody.requests.push(obj);
+            }
+        })
+        req.body = newRequestBody;
+        scrapeUrl(req, res, next, 'crawl', filename).then(resp => {
+            resolve(resp);
+        });
+    })
+}
+
+async function scrapeCardekho_Crawler(req, res, next, filename) {
+    return new Promise((resolve, reject) => {
+        let newRequestBody = { requests: [] };
+        let urls = cardhekhoUrls.urls;
+        urls.map((e, i, arr) => {
+            let obj = {
+                baseUrl: "https://www.cardekho.com",
+                url: e,
+                data: [
+                    {
+                        "name": "carName",
+                        "query": ".BuyUCDetailComp .VDPtopCard .paddingBorder h1",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carModelCategory",
+                        "query": ".BuyUCDetailComp .VDPtopCard .paddingBorder .variant-name",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carPrice",
+                        "query": ".BuyUCDetailComp .VDPtopCard .priceSection span:nth-child(2)",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carEMI",
+                        "query": ".BuyUCDetailComp .VDPtopCard .paddingBorder .emitextF span",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carOverview",
+                        "query_name": ".overviewCArd .listIcons .head",
+                        "query_val": ".overviewCArd .listIcons .value",
+                        "type": "text",
+                        "val": true,
+                        "typeVal": null
+                    }
+                ],
+                puppet: null,
+            }
+            newRequestBody.requests.push(obj);
+        })
+        req.body = newRequestBody;
+        scrapeUrl(req, res, next, 'crawl', filename).then(resp => {
+            resolve(resp);
+        });
+    })
+}
+
+async function scrapeSpinny_Crawler(req, res, next, filename) {
+    return new Promise((resolve, reject) => {
+        let newRequestBody = { requests: [] };
+        let urls = spinnyUrls.urls;
+        urls.map((e, i, arr) => {
+            let obj = {
+                baseUrl: "https://www.spinny.com",
+                data: [
+                    {
+                        "name": "carName",
+                        "query": ".DesktopRightSection__carDetailSection .DesktopRightSection__carName",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carModelCategory",
+                        "query": ".DesktopRightSection__carDetailSection .DesktopRightSection__otherDetailSection",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carPrice",
+                        "query": ".DesktopRightSection__carDetailSection .DesktopRightSection__priceSection .DesktopRightSection__price",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carEMI",
+                        "query": ".DesktopRightSection__carDetailSection .DesktopRightSection__emiBuyback .DesktopRightSection__finance",
+                        "type": "text",
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carOverview",
+                        "query_name": ".DesktopOverview__overviewItemList .DesktopOverview__itemLabel",
+                        "query_val": ".DesktopOverview__overviewItemList .DesktopOverview__itemDisplay",
+                        "type": "text",
+                        "val": true,
+                        "typeVal": null
+                    },
+                    {
+                        "name": "carSpecs",
+                        "query_name": ".ProductDesktop__featureSpecification .styles__carSpecificationWrapper .styles__listItemDesktop .styles__listKey",
+                        "query_val": ".ProductDesktop__featureSpecification .styles__carSpecificationWrapper .styles__listItemDesktop .styles__listValue",
+                        "type": "text",
+                        "val": true,
+                        "typeVal": null
+                    }
+                ],
+                url: e,
+                puppet: spinnyUrls.puppet,
+            }
+            newRequestBody.requests.push(obj);
+        })
+        req.body = newRequestBody;
+        scrapeUrl(req, res, next, 'crawl', filename).then(resp => {
+            resolve(resp);
+        });
+    })
+}
+
 module.exports = {
-    scrapeUrl, retrieveData, modifyDataInquiry, getSourceCodes, scrapeCarDekho
+    scrapeUrl,
+    retrieveData,
+    modifyDataInquiry,
+    getSourceCodes,
+    scrapeCarDekho_Targeted,
+    scrapeOlxCars_Targeted,
+    scrapeDroomCars_Crawler,
+    scrapeCardekho_Crawler,
+    scrapeSpinny_Crawler
 }
 
 

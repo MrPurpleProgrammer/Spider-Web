@@ -1,0 +1,41 @@
+{
+	"requests": [
+		{
+			"baseUrl": "https://www.olx.in",
+			"url": "https://www.olx.in/cars_c84",
+			"puppet": {
+				"scrollClick": {
+					"interval": 0.4,
+					"timeout": 60,
+					"element": ".JbJAl button"					
+				}
+			},
+			"data": [
+				{
+					"name": "carName",
+					"query": ".EIR5N .IKo3_ ._2tW1I",
+					"type": "text",
+					"typeVal": null
+				},
+				{
+					"name": "carPrice",
+					"query": ".EIR5N .IKo3_ ._89yzn",
+					"type": "html",
+					"typeVal": null
+				},
+				{
+					"name": "carMileage",
+					"query": ".EIR5N .IKo3_ _2TVI3",
+					"type": "text",
+					"typeVal": null
+				},
+				{
+					"name": "detailUrl",
+					"query": ".EIR5N a",
+					"type": "attr",
+					"typeVal": "href"
+				}
+			]
+		}
+	]
+}
